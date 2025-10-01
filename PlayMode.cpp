@@ -12,6 +12,18 @@
 #include <random>
 #include <array>
 
+inline bool parse_message(std::vector<uint8_t>& buf, uint8_t& out_type, std::vector<uint8_t>& out_payload) { //@GPT
+    if (buf.size() < 2) return false;                     // shorter than type+len
+    uint8_t type = buf[0];
+    uint8_t len = buf[1];
+    if (buf.size() < 2u + len) return false;              // buf waiting for more date
+
+    out_type = type;
+    out_payload.assign(buf.begin() + 2, buf.begin() + 2 + len);
+    buf.erase(buf.begin(), buf.begin() + 2 + len);        // erase parsed data
+    return true;
+}
+
 PlayMode::PlayMode(Client &client_) : client(client_) {
 }
 
@@ -91,7 +103,26 @@ void PlayMode::update(float elapsed) {
 			try {
 				do {
 					handled_message = false;
-					if (game.recv_state_message(c)) handled_message = true;
+					if (game.recv_state_message(c)) {
+						handled_message = true;
+						continue;
+					}
+
+					uint8_t type; std::vector<uint8_t> payload;
+					while (parse_message(c->recv_buffer, type, payload)) {
+						handled_message = true;
+						switch (type) {
+							case 'F': { // Full Room Message
+								std::string text(payload.begin(), payload.end());
+								std::cerr << "[Server] " << text << "\n";
+								throw std::runtime_error("Server says: " + text);
+							} break;
+							// Other types
+							default:
+								// Unknown types
+								break;
+						}
+					}					
 				} while (handled_message);
 			} catch (std::exception const &e) {
 				std::cerr << "[" << c->socket << "] malformed message from server: " << e.what() << std::endl;
@@ -148,10 +179,22 @@ void PlayMode::draw(glm::uvec2 const &drawable_size) {
 				glm::u8vec4(0xff, 0xff, 0xff, 0x00));
 		};
 
+		//draw arena boundaries
 		lines.draw(glm::vec3(Game::ArenaMin.x, Game::ArenaMin.y, 0.0f), glm::vec3(Game::ArenaMax.x, Game::ArenaMin.y, 0.0f), glm::u8vec4(0xff, 0x00, 0xff, 0xff));
 		lines.draw(glm::vec3(Game::ArenaMin.x, Game::ArenaMax.y, 0.0f), glm::vec3(Game::ArenaMax.x, Game::ArenaMax.y, 0.0f), glm::u8vec4(0xff, 0x00, 0xff, 0xff));
 		lines.draw(glm::vec3(Game::ArenaMin.x, Game::ArenaMin.y, 0.0f), glm::vec3(Game::ArenaMin.x, Game::ArenaMax.y, 0.0f), glm::u8vec4(0xff, 0x00, 0xff, 0xff));
 		lines.draw(glm::vec3(Game::ArenaMax.x, Game::ArenaMin.y, 0.0f), glm::vec3(Game::ArenaMax.x, Game::ArenaMax.y, 0.0f), glm::u8vec4(0xff, 0x00, 0xff, 0xff));
+
+		//draw arena horizontal grid lines
+		lines.draw(glm::vec3(Game::ArenaMin.x, Game::ArenaMin.y/2, 0.0f), glm::vec3(Game::ArenaMax.x, Game::ArenaMin.y/2, 0.0f), glm::u8vec4(0xff, 0x00, 0xff, 0xff));
+		lines.draw(glm::vec3(Game::ArenaMin.x, 0.0f, 0.0f), glm::vec3(Game::ArenaMax.x, 0.0f, 0.0f), glm::u8vec4(0xff, 0x00, 0xff, 0xff));
+		lines.draw(glm::vec3(Game::ArenaMin.x, Game::ArenaMax.y/2, 0.0f), glm::vec3(Game::ArenaMax.x, Game::ArenaMax.y/2, 0.0f), glm::u8vec4(0xff, 0x00, 0xff, 0xff));
+
+		//draw arena vertical grid lines
+		lines.draw(glm::vec3(Game::ArenaMin.x/2, Game::ArenaMin.y, 0.0f), glm::vec3(Game::ArenaMin.x/2, Game::ArenaMax.y, 0.0f), glm::u8vec4(0xff, 0x00, 0xff, 0xff));
+		lines.draw(glm::vec3(0.0f, Game::ArenaMin.y, 0.0f), glm::vec3(0.0f, Game::ArenaMax.y, 0.0f), glm::u8vec4(0xff, 0x00, 0xff, 0xff));
+		lines.draw(glm::vec3(Game::ArenaMax.x/2, Game::ArenaMin.y, 0.0f), glm::vec3(Game::ArenaMax.x/2, Game::ArenaMax.y, 0.0f), glm::u8vec4(0xff, 0x00, 0xff, 0xff));
+
 
 		for (auto const &player : game.players) {
 			glm::u8vec4 col = glm::u8vec4(player.color.x*255, player.color.y*255, player.color.z*255, 0xff);

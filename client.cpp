@@ -65,7 +65,7 @@ int main(int argc, char **argv) {
 
 	//create window:
 	Mode::window = SDL_CreateWindow(
-		"gp25 game5: multiplayer", //TODO: remember to set a title for your game!
+		"Slay The Board", //TODO: remember to set a title for your game!
 		1280, 720, //TODO: modify window size if you'd like
 		SDL_WINDOW_OPENGL
 		| SDL_WINDOW_RESIZABLE //uncomment to allow resizing

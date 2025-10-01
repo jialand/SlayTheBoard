@@ -47,6 +47,7 @@ struct Player {
 };
 
 struct Game {
+	static constexpr size_t MaxPlayers = 2;
 	std::list< Player > players; //(using list so they can have stable addresses)
 	Player *spawn_player(); //add player the end of the players list (may also, e.g., play some spawn anim)
 	void remove_player(Player *); //remove player from game (may also, e.g., play some despawn anim)
@@ -64,8 +65,8 @@ struct Game {
 	inline static constexpr float Tick = 1.0f / 30.0f;
 
 	//arena size:
-	inline static constexpr glm::vec2 ArenaMin = glm::vec2(-0.75f, -1.0f);
-	inline static constexpr glm::vec2 ArenaMax = glm::vec2( 0.75f,  1.0f);
+	inline static constexpr glm::vec2 ArenaMin = glm::vec2(-1.0f, -1.0f);
+	inline static constexpr glm::vec2 ArenaMax = glm::vec2( 1.0f,  1.0f);
 
 	//player constants:
 	inline static constexpr float PlayerRadius = 0.06f;

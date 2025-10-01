@@ -14,6 +14,15 @@
 #ifdef _WIN32
 extern "C" { uint32_t GetACP(); }
 #endif
+
+void send_message(Connection *c, uint8_t type, std::string message) {
+	c->send(type);
+	uint8_t len = static_cast<uint8_t>(std::min<size_t>(message.size(), 255));
+	if(len > 255) throw std::runtime_error("Message length is too long");
+	c->send(len);
+	c->send_raw(message.data(), len);
+}
+
 int main(int argc, char **argv) {
 #ifdef _WIN32
 	{ //when compiled on windows, check that code page is forced to utf-8 (makes file loading/saving work right):
@@ -62,15 +71,21 @@ int main(int argc, char **argv) {
 			//helper used on client close (due to quit) and server close (due to error):
 			auto remove_connection = [&](Connection *c) {
 				auto f = connection_to_player.find(c);
-				assert(f != connection_to_player.end());
-				game.remove_player(f->second);
-				connection_to_player.erase(f);
+				//assert(f != connection_to_player.end());
+				if(f != connection_to_player.end()) {
+					game.remove_player(f->second);
+					connection_to_player.erase(f);
+				}
 			};
 
 			server.poll([&](Connection *c, Connection::Event evt){
 				if (evt == Connection::OnOpen) {
 					//client connected:
-
+					if (connection_to_player.size() >= Game::MaxPlayers) {
+						std::cout << "Max players reached, disconnecting client." << std::endl;
+						send_message(c, 'F', "Game Server Is Full.");
+						return;
+					}
 					//create some player info for them:
 					connection_to_player.emplace(c, game.spawn_player());
 
@@ -85,7 +100,11 @@ int main(int argc, char **argv) {
 
 					//look up in players list:
 					auto f = connection_to_player.find(c);
-					assert(f != connection_to_player.end());
+					//assert(f != connection_to_player.end());
+					if(f == connection_to_player.end()) {
+						c->close();
+						return;
+					}
 					Player &player = *f->second;
 
 					//handle messages from client:
@@ -112,6 +131,7 @@ int main(int argc, char **argv) {
 		for (auto &[c, player] : connection_to_player) {
 			game.send_state_message(c, player);
 		}
+
 
 	}
 

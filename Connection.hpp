@@ -92,6 +92,7 @@ struct Connection {
 	//internals:
 	Socket socket = InvalidSocket;
 
+
 	enum Event {
 		OnOpen,
 		OnRecv,

@@ -6,6 +6,7 @@
 #include <list>
 #include <random>
 #include <cstdint> // ★ for uint8_t
+#include <unordered_map>
 
 struct Connection;
 
@@ -30,6 +31,7 @@ struct Player {
 	//player inputs (sent from client):
 	struct Controls {
 		Button left, right, up, down, jump;
+		Button attack, guard, parry; // ★ new action buttons (J/K/L)
 
 		void send_controls_message(Connection *connection) const;
 
@@ -48,6 +50,12 @@ struct Player {
 
 	int gx = 0; // ★ grid X (cell index, authoritative on server)
 	int gy = 0; // ★ grid Y (cell index, authoritative on server)
+
+	int hp = 3; // ★ hit points (3 -> dead at <=0)
+
+	enum Facing { // ★ 4-direction facing for actions
+		FaceRight = 0, FaceLeft = 1, FaceUp = 2, FaceDown = 3
+	} facing = FaceRight; // ★ default will be set at spawn
 };
 
 struct Game {
@@ -89,6 +97,23 @@ struct Game {
 			ArenaMin.y + (gy + 0.5f) * CellSize
 		);
 	}
+
+	// ★ action timing (seconds):
+	inline static constexpr float AttackCD = 2.0f;
+	inline static constexpr float GuardCD  = 3.0f;
+	inline static constexpr float ParryCD  = 5.0f;
+	inline static constexpr float GuardWindow = 0.5f;
+	inline static constexpr float ParryWindow = 0.5f;
+
+	// ★ per-player action state (cooldowns/timers):
+	struct ActionState {
+		float attack_cd = 0.0f;
+		float guard_cd  = 0.0f;
+		float parry_cd  = 0.0f;
+		float guard_t   = 0.0f; // active guard window remaining
+		float parry_t   = 0.0f; // active parry window remaining
+	};
+	std::unordered_map<Player*, ActionState> pstates; // ★ track per-player action state
 
 	//---- communication helpers ----
 

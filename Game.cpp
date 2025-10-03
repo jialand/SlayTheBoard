@@ -1,21 +1,23 @@
 #include "Game.hpp"
-
 #include "Connection.hpp"
 
 #include <stdexcept>
 #include <iostream>
 #include <cstring>
-#include <algorithm> // for std::clamp
-#include <unordered_map> // ★ pstate map
+#include <algorithm>
+#include <cmath>
+#include <unordered_set>
 
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/gtx/norm.hpp>
+
+// ---------- wire I/O for controls (unchanged) ----------
 
 void Player::Controls::send_controls_message(Connection *connection_) const {
 	assert(connection_);
 	auto &connection = *connection_;
 
-	uint32_t size = 8; // ★ 8 buttons now
+	uint32_t size = 5;
 	connection.send(Message::C2S_Controls);
 	connection.send(uint8_t(size));
 	connection.send(uint8_t(size >> 8));
@@ -33,9 +35,6 @@ void Player::Controls::send_controls_message(Connection *connection_) const {
 	send_button(up);
 	send_button(down);
 	send_button(jump);
-	send_button(attack); // ★
-	send_button(guard);  // ★
-	send_button(parry);  // ★
 }
 
 bool Player::Controls::recv_controls_message(Connection *connection_) {
@@ -44,15 +43,15 @@ bool Player::Controls::recv_controls_message(Connection *connection_) {
 
 	auto &recv_buffer = connection.recv_buffer;
 
-	//expecting [type, size_low0, size_mid8, size_high8]:
+	// expecting [type, size_low0, size_mid8, size_high8]:
 	if (recv_buffer.size() < 4) return false;
 	if (recv_buffer[0] != uint8_t(Message::C2S_Controls)) return false;
 	uint32_t size = (uint32_t(recv_buffer[3]) << 16)
 	              | (uint32_t(recv_buffer[2]) << 8)
 	              |  uint32_t(recv_buffer[1]);
-	if (size != 8) throw std::runtime_error("Controls message with size " + std::to_string(size) + " != 8!"); // ★
-	
-	//expecting complete message:
+	if (size != 5) throw std::runtime_error("Controls message with size " + std::to_string(size) + " != 5!");
+
+	// need complete message:
 	if (recv_buffer.size() < 4 + size) return false;
 
 	auto recv_button = [](uint8_t byte, Button *button) {
@@ -70,62 +69,32 @@ bool Player::Controls::recv_controls_message(Connection *connection_) {
 	recv_button(recv_buffer[4+2], &up);
 	recv_button(recv_buffer[4+3], &down);
 	recv_button(recv_buffer[4+4], &jump);
-	recv_button(recv_buffer[4+5], &attack); // ★
-	recv_button(recv_buffer[4+6], &guard);  // ★
-	recv_button(recv_buffer[4+7], &parry);  // ★
 
-	//delete message from buffer:
+	// delete message from buffer:
 	recv_buffer.erase(recv_buffer.begin(), recv_buffer.begin() + 4 + size);
 
 	return true;
 }
 
-
-//-----------------------------------------
+// ---------- Game core ----------
 
 Game::Game() : mt(0x15466666) {
 }
 
-static inline glm::ivec2 facing_vec(Player::Facing f) { // ★ map facing to dx,dy
-	switch (f) {
-		case Player::FaceRight: return {+1, 0};
-		case Player::FaceLeft:  return {-1, 0};
-		case Player::FaceUp:    return { 0,+1};
-		default:                return { 0,-1}; // FaceDown
-	}
-}
-
-static Player* get_player_at(std::list<Player> &ps, int gx, int gy) { // ★ find occupant
-	for (auto &p : ps) if (p.gx == gx && p.gy == gy) return &p;
-	return nullptr;
+// convert grid cell -> world-space center
+glm::vec2 Game::cell_to_world(glm::ivec2 cell) {
+	glm::vec2 min = ArenaMin;
+	glm::vec2 max = ArenaMax;
+	glm::vec2 cell_size = (max - min) / float(GridN);
+	glm::vec2 center = min + (glm::vec2(cell) + glm::vec2(0.5f)) * cell_size;
+	return center;
 }
 
 Player *Game::spawn_player() {
 	players.emplace_back();
 	Player &player = players.back();
 
-	// spawn at corners and set default facing:
-	//   first -> top-left (face right), second -> bottom-right (face left)
-	size_t idx = 0;
-	for (auto pi = players.begin(); pi != players.end(); ++pi) { if (&*pi == &player) break; ++idx; }
-	if (idx == 0) {
-		player.gx = 0;
-		player.gy = BoardH - 1;
-		player.facing = Player::FaceRight; // ★ default facing
-	} else if (idx == 1) {
-		player.gx = BoardW - 1;
-		player.gy = 0;
-		player.facing = Player::FaceLeft;  // ★ default facing
-	} else {
-		player.gx = 0;
-		player.gy = 0;
-		player.facing = Player::FaceRight;
-	}
-	player.position = cell_center(player.gx, player.gy);
-	player.velocity = glm::vec2(0.0f);
-	player.hp = 3; // ★ reset hp
-
-	// keep color/name logic
+	// color
 	do {
 		player.color.r = mt() / float(mt.max());
 		player.color.g = mt() / float(mt.max());
@@ -135,8 +104,24 @@ Player *Game::spawn_player() {
 
 	player.name = "Player " + std::to_string(next_player_number++);
 
-	// init action state entry (cooldowns/timers zero)
-	pstates[&player] = ActionState{}; // ★
+	player.ready = false;
+	player.hp = 3;
+	player.pending_action = 0;
+
+	// initial spawn and facing
+	if (players.size() == 1) {
+		player.cell = glm::ivec2(0, GridN - 1);
+		player.facing = glm::ivec2(1, 0);
+	} else {
+		player.cell = glm::ivec2(GridN - 1, 0);
+		player.facing = glm::ivec2(-1, 0);
+	}
+
+	player.position = cell_to_world(player.cell);
+	player.velocity = glm::vec2(0.0f);
+
+	// ensure runtime slot
+	pstates[&player] = PerPlayerRuntime{};
 
 	return &player;
 }
@@ -145,7 +130,7 @@ void Game::remove_player(Player *player) {
 	bool found = false;
 	for (auto pi = players.begin(); pi != players.end(); ++pi) {
 		if (&*pi == player) {
-			pstates.erase(&*pi); // ★ drop action state
+			pstates.erase(&*pi);
 			players.erase(pi);
 			found = true;
 			break;
@@ -154,172 +139,240 @@ void Game::remove_player(Player *player) {
 	assert(found);
 }
 
-// optional: disallow walking into occupied cell
-static bool cell_occupied(std::list<Player> const &players, int gx, int gy, Player const *self) {
-	for (auto const &q : players) {
-		if (&q == self) continue;
-		if (q.gx == gx && q.gy == gy) return true;
+void Game::update(float elapsed) {
+	// sync pstates with current players
+	std::unordered_set<Player*> alive;
+	for (auto &p : players) {
+		alive.insert(&p);
+		if (!pstates.count(&p)) pstates[&p] = PerPlayerRuntime{};
 	}
-	return false;
-}
+	for (auto it = pstates.begin(); it != pstates.end(); ) {
+		if (!alive.count(it->first)) it = pstates.erase(it);
+		else ++it;
+	}
 
-// ★ helper: apply 1 damage with block/parry logic; returns true if damage applied
-static bool try_apply_hit(Game &game, Player *attacker, Player *victim, int src_gx, int src_gy) {
-	if (!attacker || !victim) return false;
-	if (victim->hp <= 0) return false;
+	// decay timers
+	for (auto &kv : pstates) {
+		auto &rt = kv.second;
+		rt.atk_cd  = std::max(0.0f, rt.atk_cd  - elapsed);
+		rt.def_cd  = std::max(0.0f, rt.def_cd  - elapsed);
+		rt.pry_cd  = std::max(0.0f, rt.pry_cd  - elapsed);
+		rt.defend_t= std::max(0.0f, rt.defend_t- elapsed);
+		rt.parry_t = std::max(0.0f, rt.parry_t - elapsed);
+	}
 
-	auto it = game.pstates.find(victim);
-	if (it == game.pstates.end()) return false;
-	auto &vs = it->second;
+	// --- phase management ---
+	if (players.size() < 2) {
+		phase = Phase::Waiting;
+		winner_index = -1;
+		for (auto &p : players) p.ready = false;
+	}
 
-	// Is the attack coming from the victim's facing direction (front)?
-	glm::ivec2 vf = facing_vec(victim->facing);
-	bool from_front = (src_gx == victim->gx + vf.x) && (src_gy == victim->gy + vf.y);
-
-	// Parry window first: if active and from front -> negate and reflect 1 damage
-	if (vs.parry_t > 0.0f && from_front) {
-		// reflect to source cell (one cell in victim's facing = the attacker cell)
-		Player *src = get_player_at(game.players, src_gx, src_gy);
-		if (src && src->hp > 0) {
-			src->hp = std::max(0, src->hp - 1);
-			if (src->hp == 0) {
-				std::cout << victim->name << " wins by parry!" << std::endl;
+	if (players.size() >= 2 && (phase == Phase::Waiting)) {
+		phase = Phase::ReadyPrompt;
+		winner_index = -1;
+		for (auto &p : players) { p.ready = false; p.hp = 3; }
+		// reset spawn
+		auto it = players.begin();
+		if (it != players.end()) {
+			it->cell = glm::ivec2(0, GridN - 1);
+			it->facing = glm::ivec2(1,0);
+			it->position = cell_to_world(it->cell);
+		}
+		if (it != players.end()) {
+			++it;
+			if (it != players.end()) {
+				it->cell = glm::ivec2(GridN - 1, 0);
+				it->facing = glm::ivec2(-1,0);
+				it->position = cell_to_world(it->cell);
 			}
 		}
-		return false; // victim takes no damage
 	}
 
-	// Guard window next: if active and from front -> negate damage
-	if (vs.guard_t > 0.0f && from_front) {
-		return false;
-	}
-
-	// Otherwise, apply damage
-	victim->hp = std::max(0, victim->hp - 1);
-	if (victim->hp == 0) {
-		std::cout << (attacker ? attacker->name : std::string("Unknown"))
-		          << " wins!" << std::endl;
-	}
-	return true;
-}
-
-void Game::update(float elapsed) {
-	// decrement cooldowns/timers
-	for (auto &p : players) {
-		auto &s = pstates[&p];
-		s.attack_cd = std::max(0.0f, s.attack_cd - elapsed);
-		s.guard_cd  = std::max(0.0f, s.guard_cd  - elapsed);
-		s.parry_cd  = std::max(0.0f, s.parry_cd  - elapsed);
-		s.guard_t   = std::max(0.0f, s.guard_t   - elapsed);
-		s.parry_t   = std::max(0.0f, s.parry_t   - elapsed);
-	}
-
-	// grid-snap movement (consume downs; set facing to last move)
-	for (auto &p : players) {
-		int nx = p.gx;
-		int ny = p.gy;
-
-		auto step = [&](int dx, int dy, uint8_t &downs, Player::Facing face_dir) {
-			while (downs > 0) {
-				int tx = std::clamp(nx + dx, 0, BoardW - 1);
-				int ty = std::clamp(ny + dy, 0, BoardH - 1);
-				if (!cell_occupied(players, tx, ty, &p)) {
-					nx = tx; ny = ty;
-					p.facing = face_dir; // ★ face to the direction of movement
-				}
-				downs -= 1;
+	// Enter to ready (mapped from jump.downs)
+	if (phase == Phase::ReadyPrompt) {
+		for (auto &p : players) {
+			if (p.controls.jump.downs > 0) p.ready = true;
+		}
+		if (players.size() >= 2) {
+			auto it = players.begin();
+			Player &p0 = *it++;
+			Player &p1 = *it;
+			if (p0.ready && p1.ready) {
+				phase = Phase::Playing;
+				winner_index = -1;
+				p0.hp = 3; p1.hp = 3;
+				// snap positions to spawn
+				p0.cell = glm::ivec2(0, GridN - 1); p0.facing = glm::ivec2(1,0);
+				p1.cell = glm::ivec2(GridN - 1, 0); p1.facing = glm::ivec2(-1,0);
+				p0.position = cell_to_world(p0.cell);
+				p1.position = cell_to_world(p1.cell);
+				// clear combat runtime
+				pstates[&p0] = PerPlayerRuntime{};
+				pstates[&p1] = PerPlayerRuntime{};
 			}
+		}
+	}
+
+	// --- grid movement: one step per key down, clamped to board, no overlap ---
+	if (phase == Phase::Playing && players.size() >= 2) {
+		auto it = players.begin();
+		Player &p0 = *it++;
+		Player &p1 = *it;
+
+		auto try_move = [&](Player &p, const glm::ivec2 &delta, const Player &other) {
+			if (delta == glm::ivec2(0)) return;
+			glm::ivec2 tgt = p.cell + delta;
+			tgt.x = std::clamp(tgt.x, 0, GridN - 1);
+			tgt.y = std::clamp(tgt.y, 0, GridN - 1);
+			// block if the target cell is occupied by the other player
+			if (tgt == other.cell) {
+				// still update facing even if blocked
+				if (delta.x != 0 || delta.y != 0) p.facing = glm::ivec2((delta.x!=0)?(delta.x>0?1:-1):0, (delta.y!=0)?(delta.y>0?1:-1):0);
+				return;
+			}
+			// commit move
+			p.cell = tgt;
+			if (delta.x != 0 || delta.y != 0) p.facing = glm::ivec2((delta.x!=0)?(delta.x>0?1:-1):0, (delta.y!=0)?(delta.y>0?1:-1):0);
 		};
 
-		step(-1,  0, p.controls.left.downs,  Player::FaceLeft);
-		step( 1,  0, p.controls.right.downs, Player::FaceRight);
-		step( 0,  1, p.controls.up.downs,    Player::FaceUp);
-		step( 0, -1, p.controls.down.downs,  Player::FaceDown);
+		// consume one-step inputs
+		glm::ivec2 d0(0), d1(0);
+		if (p0.controls.left.downs  > 0) d0.x -= 1;
+		if (p0.controls.right.downs > 0) d0.x += 1;
+		if (p0.controls.down.downs  > 0) d0.y -= 1;
+		if (p0.controls.up.downs    > 0) d0.y += 1;
 
-		p.gx = nx; p.gy = ny;
-		p.position = cell_center(p.gx, p.gy);
-		p.velocity = glm::vec2(0.0f);
-	}
+		if (p1.controls.left.downs  > 0) d1.x -= 1;
+		if (p1.controls.right.downs > 0) d1.x += 1;
+		if (p1.controls.down.downs  > 0) d1.y -= 1;
+		if (p1.controls.up.downs    > 0) d1.y += 1;
 
-	// actions: attack/guard/parry
-	for (auto &p : players) {
-		auto &s = pstates[&p];
-		// ATTACK: immediate 1 dmg to the cell in front; 2s cooldown
-		if (p.controls.attack.downs > 0 && s.attack_cd <= 0.0f) {
-			glm::ivec2 af = facing_vec(p.facing);
-			int tx = std::clamp(p.gx + af.x, 0, BoardW - 1);
-			int ty = std::clamp(p.gy + af.y, 0, BoardH - 1);
-			Player *victim = get_player_at(players, tx, ty);
-			if (victim) {
-				try_apply_hit(*this, &p, victim, p.gx, p.gy);
+		try_move(p0, d0, p1);
+		try_move(p1, d1, p0);
+
+		// snap world positions
+		p0.position = cell_to_world(p0.cell);
+		p1.position = cell_to_world(p1.cell);
+		p0.velocity = glm::vec2(0.0f);
+		p1.velocity = glm::vec2(0.0f);
+
+		// ---------- combat ----------
+		auto &r0 = pstates[&p0];
+		auto &r1 = pstates[&p1];
+
+		// 1) arm defend/parry windows first (so same-tick defense works)
+		if ((p0.pending_action & Action_Defend) && r0.def_cd <= 0.0f) {
+			r0.defend_t = GuardWindow;
+			r0.def_cd = DefendCooldown;
+		}
+		if ((p0.pending_action & Action_Parry) && r0.pry_cd <= 0.0f) {
+			r0.parry_t = GuardWindow;
+			r0.pry_cd = ParryCooldown;
+		}
+		if ((p1.pending_action & Action_Defend) && r1.def_cd <= 0.0f) {
+			r1.defend_t = GuardWindow;
+			r1.def_cd = DefendCooldown;
+		}
+		if ((p1.pending_action & Action_Parry) && r1.pry_cd <= 0.0f) {
+			r1.parry_t = GuardWindow;
+			r1.pry_cd = ParryCooldown;
+		}
+
+		// helper: check if defender faces attacker (for blocking direction)
+		auto faces_attacker = [](const Player &defender, const Player &attacker)->bool {
+			glm::ivec2 dir = attacker.cell - defender.cell; // from defender to attacker
+			return dir == defender.facing;
+		};
+
+		// 2) resolve attacks (check target cell = cell + facing)
+		auto try_attack = [&](Player &attacker, PerPlayerRuntime &ra, Player &defender, PerPlayerRuntime &rd) {
+			if (!(attacker.pending_action & Action_Attack)) return;
+			if (ra.atk_cd > 0.0f) return;
+
+			glm::ivec2 target = attacker.cell + attacker.facing;
+			if (target == defender.cell) {
+				bool block_dir = faces_attacker(defender, attacker);
+
+				bool parried = (rd.parry_t > 0.0f) && block_dir;
+				bool defended = (rd.defend_t > 0.0f) && block_dir;
+
+				if (parried) {
+					// defender parries: attacker takes 1 damage
+					if (attacker.hp > 0) attacker.hp -= 1;
+				} else if (defended) {
+					// blocked: no damage
+				} else {
+					// hit: defender takes 1 damage
+					if (defender.hp > 0) defender.hp -= 1;
+				}
 			}
-			s.attack_cd = AttackCD;
-		}
+			ra.atk_cd = AttackCooldown;
+		};
 
-		// GUARD: enable front block for 0.5s; 3s cooldown
-		if (p.controls.guard.downs > 0 && s.guard_cd <= 0.0f) {
-			s.guard_t = GuardWindow;
-			s.guard_cd = GuardCD;
-		}
-
-		// PARRY: enable front parry for 0.5s; 5s cooldown
-		if (p.controls.parry.downs > 0 && s.parry_cd <= 0.0f) {
-			s.parry_t = ParryWindow;
-			s.parry_cd = ParryCD;
-		}
-
-		// clear action downs after consumption
-		p.controls.attack.downs = 0;
-		p.controls.guard.downs = 0;
-		p.controls.parry.downs = 0;
-
-		// also clear pressed flags to avoid client “held” drift (optional)
-		p.controls.left.pressed = false;
-		p.controls.right.pressed = false;
-		p.controls.up.pressed = false;
-		p.controls.down.pressed = false;
-		p.controls.jump.pressed = false;
-		p.controls.attack.pressed = false;
-		p.controls.guard.pressed = false;
-		p.controls.parry.pressed = false;
+		// attacks (order does not matter because damage is immediate and we don't remove players mid-frame)
+		try_attack(p0, r0, p1, r1);
+		try_attack(p1, r1, p0, r0);
 	}
 
-	// clamp inside arena (safety)
-	for (auto &p1 : players) {
-		if (p1.position.x < ArenaMin.x + PlayerRadius) p1.position.x = ArenaMin.x + PlayerRadius;
-		if (p1.position.x > ArenaMax.x - PlayerRadius) p1.position.x = ArenaMax.x - PlayerRadius;
-		if (p1.position.y < ArenaMin.y + PlayerRadius) p1.position.y = ArenaMin.y + PlayerRadius;
-		if (p1.position.y > ArenaMax.y - PlayerRadius) p1.position.y = ArenaMax.y - PlayerRadius;
+	// reset 'downs' since controls have been handled; clear this-tick actions
+	for (auto &p : players) {
+		p.controls.left.downs = 0;
+		p.controls.right.downs = 0;
+		p.controls.up.downs = 0;
+		p.controls.down.downs = 0;
+		p.controls.jump.downs = 0;
+		p.pending_action = 0;
+	}
+
+	// round end check
+	if (phase == Phase::Playing && players.size() >= 2) {
+		auto it = players.begin();
+		const Player &p0 = *it++;
+		const Player &p1 = *it;
+		if (p0.hp == 0 || p1.hp == 0) {
+			phase = Phase::RoundEnd;
+			winner_index = (p0.hp > p1.hp) ? 0 : 1;
+			const_cast<Player&>(p0).ready = false;
+			const_cast<Player&>(p1).ready = false;
+			// clear windows so不会残留到下一局
+			pstates.at(const_cast<Player*>(&p0)) = PerPlayerRuntime{};
+			pstates.at(const_cast<Player*>(&p1)) = PerPlayerRuntime{};
+		}
 	}
 }
 
+// ---------- S2C state (phase/winner + per-player hp/ready + POD) ----------
 
 void Game::send_state_message(Connection *connection_, Player *connection_player) const {
 	assert(connection_);
 	auto &connection = *connection_;
 
 	connection.send(Message::S2C_State);
-	//will patch message size in later, for now placeholder bytes:
+	// placeholder size (3 bytes)
 	connection.send(uint8_t(0));
 	connection.send(uint8_t(0));
 	connection.send(uint8_t(0));
-	size_t mark = connection.send_buffer.size(); //keep track of this position in the buffer
+	size_t mark = connection.send_buffer.size();
 
+	// write phase + winner_index first:
+	connection.send(uint8_t(phase));
+	connection.send(int8_t(winner_index));
 
-	//send player info helper:
+	// helper to send a player:
 	auto send_player = [&](Player const &player) {
 		connection.send(player.position);
 		connection.send(player.velocity);
 		connection.send(player.color);
-	
-		//NOTE: can't just 'send(name)' because player.name is not plain-old-data type.
-		//effectively: truncates player name to 255 chars
 		uint8_t len = uint8_t(std::min< size_t >(255, player.name.size()));
 		connection.send(len);
 		connection.send_buffer.insert(connection.send_buffer.end(), player.name.begin(), player.name.begin() + len);
+		// ready + hp
+		connection.send(uint8_t(player.ready ? 1 : 0));
+		connection.send(uint8_t(player.hp));
 	};
 
-	//player count:
+	// player count (send connection's player first)
 	connection.send(uint8_t(players.size()));
 	if (connection_player) send_player(*connection_player);
 	for (auto const &player : players) {
@@ -327,7 +380,7 @@ void Game::send_state_message(Connection *connection_, Player *connection_player
 		send_player(player);
 	}
 
-	//compute the message size and patch into the message header:
+	// patch size
 	uint32_t size = uint32_t(connection.send_buffer.size() - mark);
 	connection.send_buffer[mark-3] = uint8_t(size);
 	connection.send_buffer[mark-2] = uint8_t(size >> 8);
@@ -345,20 +398,24 @@ bool Game::recv_state_message(Connection *connection_) {
 	              | (uint32_t(recv_buffer[2]) << 8)
 	              |  uint32_t(recv_buffer[1]);
 	uint32_t at = 0;
-	//expecting complete message:
 	if (recv_buffer.size() < 4 + size) return false;
 
-	//copy bytes from buffer and advance position:
 	auto read = [&](auto *val) {
-		if (at + sizeof(*val) > size) {
-			throw std::runtime_error("Ran out of bytes reading state message.");
-		}
+		if (at + sizeof(*val) > size) throw std::runtime_error("Ran out of bytes reading state message.");
 		std::memcpy(val, &recv_buffer[4 + at], sizeof(*val));
 		at += sizeof(*val);
 	};
 
+	// read phase + winner_index
+	uint8_t phase_u8 = 0;
+	int8_t win_i8 = -1;
+	read(&phase_u8);
+	read(&win_i8);
+	phase = Phase(phase_u8);
+	winner_index = win_i8;
+
 	players.clear();
-	uint8_t player_count;
+	uint8_t player_count = 0;
 	read(&player_count);
 	for (uint8_t i = 0; i < player_count; ++i) {
 		players.emplace_back();
@@ -366,21 +423,24 @@ bool Game::recv_state_message(Connection *connection_) {
 		read(&player.position);
 		read(&player.velocity);
 		read(&player.color);
-		uint8_t name_len;
+		uint8_t name_len = 0;
 		read(&name_len);
-		//n.b. would probably be more efficient to directly copy from recv_buffer, but I think this is clearer:
-		player.name = "";
+		player.name.clear();
 		for (uint8_t n = 0; n < name_len; ++n) {
 			char c;
 			read(&c);
 			player.name += c;
 		}
+		uint8_t ready_u8 = 0;
+		uint8_t hp_u8 = 3;
+		read(&ready_u8);
+		read(&hp_u8);
+		player.ready = (ready_u8 != 0);
+		player.hp = hp_u8;
 	}
 
 	if (at != size) throw std::runtime_error("Trailing data in state message.");
 
-	//delete message from buffer:
 	recv_buffer.erase(recv_buffer.begin(), recv_buffer.begin() + 4 + size);
-
 	return true;
 }

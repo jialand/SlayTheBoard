@@ -1,7 +1,5 @@
 #include "Connection.hpp"
-
 #include "hex_dump.hpp"
-
 #include "Game.hpp"
 
 #include <chrono>
@@ -9,60 +7,49 @@
 #include <iostream>
 #include <cassert>
 #include <unordered_map>
-#include <algorithm> // ★ for std::min
-#include <cstdint>   // ★ for uint8_t
 
 #ifdef _WIN32
-#define NOMINMAX 1            // ★ avoid Windows min/max macros
-#include <windows.h>          // ★ use official GetACP() declaration
+extern "C" { uint32_t GetACP(); }
 #endif
 
-void send_message(Connection *c, uint8_t type, std::string message) {
-	c->send(type);
-	uint8_t len = static_cast<uint8_t>(std::min<size_t>(message.size(), 255));
-	// (the check below is redundant after std::min, but kept for clarity)
-	if(len > 255) throw std::runtime_error("Message length is too long");
-	c->send(len);
-	c->send_raw(message.data(), len);
+// tiny helper: try to parse our C2S_Action frame from recv_buffer
+static bool try_recv_action(Connection* c, uint8_t& out_mask) {
+	auto& buf = c->recv_buffer;
+	if (buf.size() < 4) return false;
+	if (buf[0] != uint8_t(Message::C2S_Action)) return false;
+	uint32_t size = (uint32_t(buf[3]) << 16) | (uint32_t(buf[2]) << 8) | uint32_t(buf[1]);
+	if (size != 1) throw std::runtime_error("C2S_Action with unexpected size");
+	if (buf.size() < 4 + size) return false; // wait for full payload
+	out_mask = buf[4];
+	buf.erase(buf.begin(), buf.begin() + 5);
+	return true;
 }
 
 int main(int argc, char **argv) {
 #ifdef _WIN32
 	{ //when compiled on windows, check that code page is forced to utf-8 (makes file loading/saving work right):
-		//see: https://docs.microsoft.com/en-us/windows/apps/design/globalizing/use-utf8-code-page
-		UINT code_page = GetACP(); // ★ use Windows' UINT
+		uint32_t code_page = GetACP();
 		if (code_page == 65001) {
 			std::cout << "Code page is properly set to UTF-8." << std::endl;
 		} else {
 			std::cout << "WARNING: code page is set to " << code_page << " instead of 65001 (UTF-8). Some file handling functions may fail." << std::endl;
 		}
 	}
-
-	//when compiled on windows, unhandled exceptions don't have their message printed, which can make debugging simple issues difficult.
 	try {
 #endif
-
-	//------------ argument parsing ------------
 
 	if (argc != 2) {
 		std::cerr << "Usage:\n\t./server <port>" << std::endl;
 		return 1;
 	}
 
-	//------------ initialization ------------
-
 	Server server(argv[1]);
 
-	//------------ main loop ------------
-
-	//keep track of which connection is controlling which player:
 	std::unordered_map< Connection *, Player * > connection_to_player;
-	//keep track of game state:
 	Game game;
 
 	while (true) {
 		static auto next_tick = std::chrono::steady_clock::now() + std::chrono::duration< double >(Game::Tick);
-		//process incoming data from clients until a tick has elapsed:
 		while (true) {
 			auto now = std::chrono::steady_clock::now();
 			double remain = std::chrono::duration< double >(next_tick - now).count();
@@ -71,10 +58,8 @@ int main(int argc, char **argv) {
 				break;
 			}
 
-			//helper used on client close (due to quit) and server close (due to error):
 			auto remove_connection = [&](Connection *c) {
 				auto f = connection_to_player.find(c);
-				//assert(f != connection_to_player.end());
 				if(f != connection_to_player.end()) {
 					game.remove_player(f->second);
 					connection_to_player.erase(f);
@@ -83,42 +68,59 @@ int main(int argc, char **argv) {
 
 			server.poll([&](Connection *c, Connection::Event evt){
 				if (evt == Connection::OnOpen) {
-					//client connected:
 					if (connection_to_player.size() >= Game::MaxPlayers) {
 						std::cout << "Max players reached, disconnecting client." << std::endl;
-						send_message(c, 'F', "Game Server Is Full.");
-						c->close(); // ★ actively close so we don't process further events from this socket
+						// optional: send 'F' frame as你之前写的
+						c->close();
 						return;
 					}
-					//create some player info for them:
 					connection_to_player.emplace(c, game.spawn_player());
 
 				} else if (evt == Connection::OnClose) {
-					//client disconnected:
-
 					remove_connection(c);
 
 				} else { assert(evt == Connection::OnRecv);
-					//got data from client:
-					//std::cout << "current buffer:\n" << hex_dump(c->recv_buffer); std::cout.flush(); //DEBUG
-
-					//look up in players list:
 					auto f = connection_to_player.find(c);
-					//assert(f != connection_to_player.end());
 					if(f == connection_to_player.end()) {
-						c->close(); // ★ ignore stray data from non-registered (rejected) connections
+						c->close();
 						return;
 					}
 					Player &player = *f->second;
 
-					//handle messages from client:
 					try {
-						bool handled_message;
+						bool progressed;
 						do {
-							handled_message = false;
-							if (player.controls.recv_controls_message(c)) handled_message = true;
-							//TODO: extend for more message types as needed
-						} while (handled_message);
+							progressed = false;
+
+							// existing controls:
+							if (player.controls.recv_controls_message(c)) {
+								progressed = true;
+								// debug print for controls (only when there was a 'downs'):
+								if (player.controls.left.downs || player.controls.right.downs ||
+									player.controls.up.downs || player.controls.down.downs ||
+									player.controls.jump.downs) {
+									std::cout << "[Controls] player=" << player.name
+										<< " L:" << int(player.controls.left.downs)
+										<< " R:" << int(player.controls.right.downs)
+										<< " U:" << int(player.controls.up.downs)
+										<< " D:" << int(player.controls.down.downs)
+										<< " JUMP:" << int(player.controls.jump.downs)
+										<< std::endl;
+								}
+							}
+
+							// new action frame:
+							uint8_t mask = 0;
+							while (try_recv_action(c, mask)) {
+								progressed = true;
+								player.pending_action |= mask; // let Game::update consume/clear it
+								std::cout << "[Action] player=" << player.name
+									<< " attack=" << ((mask & 0x1) ? 1 : 0)
+									<< " defend=" << ((mask & 0x2) ? 1 : 0)
+									<< " parry="  << ((mask & 0x4) ? 1 : 0)
+									<< std::endl;
+							}
+						} while (progressed);
 					} catch (std::exception const &e) {
 						std::cout << "Disconnecting client:" << e.what() << std::endl;
 						c->close();
@@ -128,17 +130,12 @@ int main(int argc, char **argv) {
 			}, remain);
 		}
 
-		//update current game state
 		game.update(Game::Tick);
 
-		//send updated game state to all clients
 		for (auto &[c, player] : connection_to_player) {
 			game.send_state_message(c, player);
 		}
-
-
 	}
-
 
 	return 0;
 

@@ -5,125 +5,119 @@
 #include <string>
 #include <list>
 #include <random>
-#include <cstdint> // ★ for uint8_t
+#include <cstdint>
 #include <unordered_map>
 
 struct Connection;
 
-//Game state, separate from rendering.
-
-//Currently set up for a "client sends controls" / "server sends whole state" situation.
-
+// ---- wire message types ----
 enum class Message : uint8_t {
-	C2S_Controls = 1, //Greg!
-	S2C_State = 's',
-	//...
+	C2S_Controls = 1,    // 5-byte controls
+	S2C_State    = 's',  // server -> client state
+	C2S_Action   = 'a',  // client -> server action bitmask (bit0=attack, bit1=defend, bit2=parry)
 };
 
-//used to represent a control input:
+// ---- high-level phase for client UI ----
+enum class Phase : uint8_t {
+	Waiting = 0,     // < 2 players
+	ReadyPrompt = 1, // 2 players present; waiting for ready
+	Playing = 2,     // in game
+	RoundEnd = 3     // round over
+};
+
+// ---- action bits (for pending_action) ----
+enum ActionBits : uint8_t {
+	Action_Attack = 1 << 0,
+	Action_Defend = 1 << 1,
+	Action_Parry  = 1 << 2
+};
+
+// ---- input button ----
 struct Button {
-	uint8_t downs = 0; //times the button has been pressed
-	bool pressed = false; //is the button pressed now
+	uint8_t downs = 0;   // number of press events since last tick
+	bool pressed = false;// pressed state
 };
 
-//state of one player in the game:
+// ---- per-player state ----
 struct Player {
-	//player inputs (sent from client):
+	// client -> server controls
 	struct Controls {
 		Button left, right, up, down, jump;
-		Button attack, guard, parry; // ★ new action buttons (J/K/L)
-
 		void send_controls_message(Connection *connection) const;
-
-		//returns 'false' if no message or not a controls message,
-		//returns 'true' if read a controls message,
-		//throws on malformed controls message
 		bool recv_controls_message(Connection *connection);
 	} controls;
 
-	//player state (sent from server):
-	glm::vec2 position = glm::vec2(0.0f, 0.0f);
-	glm::vec2 velocity = glm::vec2(0.0f, 0.0f);
+	// server-side: bitmask of ActionBits to be consumed in update()
+	uint8_t pending_action = 0;
 
-	glm::vec3 color = glm::vec3(1.0f, 1.0f, 1.0f);
-	std::string name = "";
+	// gameplay state (server authoritative; sent to clients)
+	bool ready = false;
+	uint8_t hp = 3;
 
-	int gx = 0; // ★ grid X (cell index, authoritative on server)
-	int gy = 0; // ★ grid Y (cell index, authoritative on server)
+	// grid movement state (server-only authoring; position is derived)
+	glm::ivec2 cell = glm::ivec2(0);
+	glm::ivec2 facing = glm::ivec2(1,0); // (±1,0) or (0,±1)
 
-	int hp = 3; // ★ hit points (3 -> dead at <=0)
-
-	enum Facing { // ★ 4-direction facing for actions
-		FaceRight = 0, FaceLeft = 1, FaceUp = 2, FaceDown = 3
-	} facing = FaceRight; // ★ default will be set at spawn
+	// preserved fields for network compatibility:
+	glm::vec2 position = glm::vec2(0.0f, 0.0f); // derived from cell each tick
+	glm::vec2 velocity = glm::vec2(0.0f, 0.0f); // kept for wire compatibility (unused)
+	glm::vec3 color    = glm::vec3(1.0f, 1.0f, 1.0f);
+	std::string name   = "";
 };
 
 struct Game {
 	static constexpr size_t MaxPlayers = 2;
-	std::list< Player > players; //(using list so they can have stable addresses)
-	Player *spawn_player(); //add player the end of the players list (may also, e.g., play some spawn anim)
-	void remove_player(Player *); //remove player from game (may also, e.g., play some despawn anim)
 
-	std::mt19937 mt; //used for spawning players
-	uint32_t next_player_number = 1; //used for naming players
+	// grid size:
+	inline static constexpr int GridN = 4;
+
+	std::list< Player > players; //(list so addresses remain stable)
+	Player *spawn_player();      // add a player; returns pointer
+	void remove_player(Player *);// remove a player
+
+	std::mt19937 mt;
+	uint32_t next_player_number = 1;
+
+	// UI phase
+	Phase phase = Phase::Waiting;
+	int8_t winner_index = -1; // -1 = none; 0/1 = who won (server reorders in send_state)
 
 	Game();
 
-	//state update function:
+	// server tick:
 	void update(float elapsed);
 
-	//constants:
-	//the update rate on the server:
+	// constants:
 	inline static constexpr float Tick = 1.0f / 30.0f;
-
-	//arena size:
 	inline static constexpr glm::vec2 ArenaMin = glm::vec2(-1.0f, -1.0f);
 	inline static constexpr glm::vec2 ArenaMax = glm::vec2( 1.0f,  1.0f);
 
-	//player constants:
 	inline static constexpr float PlayerRadius = 0.06f;
-	inline static constexpr float PlayerSpeed = 2.0f;
-	inline static constexpr float PlayerAccelHalflife = 0.25f;
-	
-	// ★ grid/board settings for 4x4 snap movement:
-	inline static constexpr int BoardW = 4;      // number of columns
-	inline static constexpr int BoardH = 4;      // number of rows
-	inline static constexpr float CellSize = 0.5f; // each cell size in world units (2.0 span / 4 = 0.5)
+	inline static constexpr float PlayerSpeed = 2.0f;            // kept (unused)
+	inline static constexpr float PlayerAccelHalflife = 0.25f;   // kept (unused)
 
-	// ★ helper: convert grid cell to world center position:
-	static inline glm::vec2 cell_center(int gx, int gy) {
-		return glm::vec2(
-			ArenaMin.x + (gx + 0.5f) * CellSize,
-			ArenaMin.y + (gy + 0.5f) * CellSize
-		);
-	}
+	// ---- networking helpers ----
+	bool recv_state_message(Connection *connection); // client
+	void send_state_message(Connection *connection, Player *connection_player = nullptr) const; // server
 
-	// ★ action timing (seconds):
-	inline static constexpr float AttackCD = 2.0f;
-	inline static constexpr float GuardCD  = 3.0f;
-	inline static constexpr float ParryCD  = 5.0f;
-	inline static constexpr float GuardWindow = 0.5f;
-	inline static constexpr float ParryWindow = 0.5f;
+private:
+	// convert grid cell -> world center
+	static glm::vec2 cell_to_world(glm::ivec2 cell);
 
-	// ★ per-player action state (cooldowns/timers):
-	struct ActionState {
-		float attack_cd = 0.0f;
-		float guard_cd  = 0.0f;
-		float parry_cd  = 0.0f;
-		float guard_t   = 0.0f; // active guard window remaining
-		float parry_t   = 0.0f; // active parry window remaining
+	// combat timing
+	inline static constexpr float AttackCooldown = 2.0f;
+	inline static constexpr float DefendCooldown = 3.0f;
+	inline static constexpr float ParryCooldown  = 5.0f;
+	inline static constexpr float GuardWindow    = 0.5f;
+
+	// per-player runtime (cooldowns + active windows)
+	struct PerPlayerRuntime {
+		float atk_cd = 0.0f;
+		float def_cd = 0.0f;
+		float pry_cd = 0.0f;
+		float defend_t = 0.0f; // >0 means defend window active
+		float parry_t  = 0.0f; // >0 means parry window active
 	};
-	std::unordered_map<Player*, ActionState> pstates; // ★ track per-player action state
 
-	//---- communication helpers ----
-
-	//used by client:
-	//set game state from data in connection buffer
-	// (return true if data was read)
-	bool recv_state_message(Connection *connection);
-
-	//used by server:
-	//send game state.
-	//  Will move "connection_player" to the front of the front of the sent list.
-	void send_state_message(Connection *connection, Player *connection_player = nullptr) const;
+	std::unordered_map< Player*, PerPlayerRuntime > pstates;
 };

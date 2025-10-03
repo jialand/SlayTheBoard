@@ -5,6 +5,7 @@
 #include <string>
 #include <list>
 #include <random>
+#include <cstdint> // ★ for uint8_t
 
 struct Connection;
 
@@ -44,6 +45,9 @@ struct Player {
 
 	glm::vec3 color = glm::vec3(1.0f, 1.0f, 1.0f);
 	std::string name = "";
+
+	int gx = 0; // ★ grid X (cell index, authoritative on server)
+	int gy = 0; // ★ grid Y (cell index, authoritative on server)
 };
 
 struct Game {
@@ -73,6 +77,18 @@ struct Game {
 	inline static constexpr float PlayerSpeed = 2.0f;
 	inline static constexpr float PlayerAccelHalflife = 0.25f;
 	
+	// ★ grid/board settings for 4x4 snap movement:
+	inline static constexpr int BoardW = 4;      // number of columns
+	inline static constexpr int BoardH = 4;      // number of rows
+	inline static constexpr float CellSize = 0.5f; // each cell size in world units (2.0 span / 4 = 0.5)
+
+	// ★ helper: convert grid cell to world center position:
+	static inline glm::vec2 cell_center(int gx, int gy) {
+		return glm::vec2(
+			ArenaMin.x + (gx + 0.5f) * CellSize,
+			ArenaMin.y + (gy + 0.5f) * CellSize
+		);
+	}
 
 	//---- communication helpers ----
 

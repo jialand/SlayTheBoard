@@ -11,16 +11,17 @@
 
 #include <random>
 #include <array>
+#include <cstdint> // ★ for uint8_t
 
 inline bool parse_message(std::vector<uint8_t>& buf, uint8_t& out_type, std::vector<uint8_t>& out_payload) { //@GPT
-    if (buf.size() < 2) return false;                     // shorter than type+len
+    if (buf.size() < 2) return false;                     // need at least type+len
     uint8_t type = buf[0];
     uint8_t len = buf[1];
-    if (buf.size() < 2u + len) return false;              // buf waiting for more date
+    if (buf.size() < 2u + len) return false;              // wait for more data
 
     out_type = type;
     out_payload.assign(buf.begin() + 2, buf.begin() + 2 + len);
-    buf.erase(buf.begin(), buf.begin() + 2 + len);        // erase parsed data
+    buf.erase(buf.begin(), buf.begin() + 2 + len);        // consume one whole frame
     return true;
 }
 
@@ -185,16 +186,17 @@ void PlayMode::draw(glm::uvec2 const &drawable_size) {
 		lines.draw(glm::vec3(Game::ArenaMin.x, Game::ArenaMin.y, 0.0f), glm::vec3(Game::ArenaMin.x, Game::ArenaMax.y, 0.0f), glm::u8vec4(0xff, 0x00, 0xff, 0xff));
 		lines.draw(glm::vec3(Game::ArenaMax.x, Game::ArenaMin.y, 0.0f), glm::vec3(Game::ArenaMax.x, Game::ArenaMax.y, 0.0f), glm::u8vec4(0xff, 0x00, 0xff, 0xff));
 
-		//draw arena horizontal grid lines
-		lines.draw(glm::vec3(Game::ArenaMin.x, Game::ArenaMin.y/2, 0.0f), glm::vec3(Game::ArenaMax.x, Game::ArenaMin.y/2, 0.0f), glm::u8vec4(0xff, 0x00, 0xff, 0xff));
-		lines.draw(glm::vec3(Game::ArenaMin.x, 0.0f, 0.0f), glm::vec3(Game::ArenaMax.x, 0.0f, 0.0f), glm::u8vec4(0xff, 0x00, 0xff, 0xff));
-		lines.draw(glm::vec3(Game::ArenaMin.x, Game::ArenaMax.y/2, 0.0f), glm::vec3(Game::ArenaMax.x, Game::ArenaMax.y/2, 0.0f), glm::u8vec4(0xff, 0x00, 0xff, 0xff));
-
-		//draw arena vertical grid lines
-		lines.draw(glm::vec3(Game::ArenaMin.x/2, Game::ArenaMin.y, 0.0f), glm::vec3(Game::ArenaMin.x/2, Game::ArenaMax.y, 0.0f), glm::u8vec4(0xff, 0x00, 0xff, 0xff));
-		lines.draw(glm::vec3(0.0f, Game::ArenaMin.y, 0.0f), glm::vec3(0.0f, Game::ArenaMax.y, 0.0f), glm::u8vec4(0xff, 0x00, 0xff, 0xff));
-		lines.draw(glm::vec3(Game::ArenaMax.x/2, Game::ArenaMin.y, 0.0f), glm::vec3(Game::ArenaMax.x/2, Game::ArenaMax.y, 0.0f), glm::u8vec4(0xff, 0x00, 0xff, 0xff));
-
+		// ★ draw 4x4 grid by equal spacing (3 inner vertical + 3 inner horizontal)
+		float cell_w = (Game::ArenaMax.x - Game::ArenaMin.x) / 4.0f;
+		float cell_h = (Game::ArenaMax.y - Game::ArenaMin.y) / 4.0f;
+		for (int i = 1; i < 4; ++i) {
+			float x = Game::ArenaMin.x + i * cell_w;
+			lines.draw(glm::vec3(x, Game::ArenaMin.y, 0.0f), glm::vec3(x, Game::ArenaMax.y, 0.0f), glm::u8vec4(0x88, 0x88, 0x88, 0xff));
+		}
+		for (int j = 1; j < 4; ++j) {
+			float y = Game::ArenaMin.y + j * cell_h;
+			lines.draw(glm::vec3(Game::ArenaMin.x, y, 0.0f), glm::vec3(Game::ArenaMax.x, y, 0.0f), glm::u8vec4(0x88, 0x88, 0x88, 0xff));
+		}
 
 		for (auto const &player : game.players) {
 			glm::u8vec4 col = glm::u8vec4(player.color.x*255, player.color.y*255, player.color.z*255, 0xff);

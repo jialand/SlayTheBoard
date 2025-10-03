@@ -1,4 +1,3 @@
-
 #include "Connection.hpp"
 
 #include "hex_dump.hpp"
@@ -10,14 +9,18 @@
 #include <iostream>
 #include <cassert>
 #include <unordered_map>
+#include <algorithm> // ★ for std::min
+#include <cstdint>   // ★ for uint8_t
 
 #ifdef _WIN32
-extern "C" { uint32_t GetACP(); }
+#define NOMINMAX 1            // ★ avoid Windows min/max macros
+#include <windows.h>          // ★ use official GetACP() declaration
 #endif
 
 void send_message(Connection *c, uint8_t type, std::string message) {
 	c->send(type);
 	uint8_t len = static_cast<uint8_t>(std::min<size_t>(message.size(), 255));
+	// (the check below is redundant after std::min, but kept for clarity)
 	if(len > 255) throw std::runtime_error("Message length is too long");
 	c->send(len);
 	c->send_raw(message.data(), len);
@@ -27,7 +30,7 @@ int main(int argc, char **argv) {
 #ifdef _WIN32
 	{ //when compiled on windows, check that code page is forced to utf-8 (makes file loading/saving work right):
 		//see: https://docs.microsoft.com/en-us/windows/apps/design/globalizing/use-utf8-code-page
-		uint32_t code_page = GetACP();
+		UINT code_page = GetACP(); // ★ use Windows' UINT
 		if (code_page == 65001) {
 			std::cout << "Code page is properly set to UTF-8." << std::endl;
 		} else {
@@ -84,6 +87,7 @@ int main(int argc, char **argv) {
 					if (connection_to_player.size() >= Game::MaxPlayers) {
 						std::cout << "Max players reached, disconnecting client." << std::endl;
 						send_message(c, 'F', "Game Server Is Full.");
+						c->close(); // ★ actively close so we don't process further events from this socket
 						return;
 					}
 					//create some player info for them:
@@ -102,7 +106,7 @@ int main(int argc, char **argv) {
 					auto f = connection_to_player.find(c);
 					//assert(f != connection_to_player.end());
 					if(f == connection_to_player.end()) {
-						c->close();
+						c->close(); // ★ ignore stray data from non-registered (rejected) connections
 						return;
 					}
 					Player &player = *f->second;

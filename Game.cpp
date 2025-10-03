@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <iostream>
 #include <cstring>
+#include <algorithm> // ★ for std::clamp
 
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/gtx/norm.hpp>
@@ -82,10 +83,25 @@ Player *Game::spawn_player() {
 	players.emplace_back();
 	Player &player = players.back();
 
-	//random point in the middle area of the arena:
-	player.position.x = glm::mix(ArenaMin.x + 2.0f * PlayerRadius, ArenaMax.x - 2.0f * PlayerRadius, 0.4f + 0.2f * mt() / float(mt.max()));
-	player.position.y = glm::mix(ArenaMin.y + 2.0f * PlayerRadius, ArenaMax.y - 2.0f * PlayerRadius, 0.4f + 0.2f * mt() / float(mt.max()));
+	// ★ spawn at corners on a 4x4 grid:
+	//    first player -> top-left cell (gx=0, gy=BoardH-1)
+	//    second player -> bottom-right cell (gx=BoardW-1, gy=0)
+	size_t idx = 0;
+	for (auto pi = players.begin(); pi != players.end(); ++pi) { if (&*pi == &player) break; ++idx; } // keep original style
+	if (idx == 0) {
+		player.gx = 0;
+		player.gy = BoardH - 1;
+	} else if (idx == 1) {
+		player.gx = BoardW - 1;
+		player.gy = 0;
+	} else {
+		player.gx = 0;
+		player.gy = 0;
+	}
+	player.position = cell_center(player.gx, player.gy); // ★ snap to cell center
+	player.velocity = glm::vec2(0.0f); // ★ no free velocity in grid mode
 
+	// keep your color/name logic (unchanged):
 	do {
 		player.color.r = mt() / float(mt.max());
 		player.color.g = mt() / float(mt.max());
@@ -110,82 +126,68 @@ void Game::remove_player(Player *player) {
 	assert(found);
 }
 
+// ★ helper: check if another player occupies target grid cell (optional blocking)
+static bool cell_occupied(std::list<Player> const &players, int gx, int gy, Player const *self) {
+	for (auto const &q : players) {
+		if (&q == self) continue;
+		if (q.gx == gx && q.gy == gy) return true;
+	}
+	return false;
+}
+
 void Game::update(float elapsed) {
-	//position/velocity update:
+	// ★ grid-snap movement: consume downs, move one cell per press
 	for (auto &p : players) {
-		glm::vec2 dir = glm::vec2(0.0f, 0.0f);
-		if (p.controls.left.pressed) dir.x -= 1.0f;
-		if (p.controls.right.pressed) dir.x += 1.0f;
-		if (p.controls.down.pressed) dir.y -= 1.0f;
-		if (p.controls.up.pressed) dir.y += 1.0f;
+		int nx = p.gx;
+		int ny = p.gy;
 
-		if (dir == glm::vec2(0.0f)) {
-			//no inputs: just drift to a stop
-			float amt = 1.0f - std::pow(0.5f, elapsed / (PlayerAccelHalflife * 2.0f));
-			p.velocity = glm::mix(p.velocity, glm::vec2(0.0f,0.0f), amt);
-		} else {
-			//inputs: tween velocity to target direction
-			dir = glm::normalize(dir);
-
-			float amt = 1.0f - std::pow(0.5f, elapsed / PlayerAccelHalflife);
-
-			//accelerate along velocity (if not fast enough):
-			float along = glm::dot(p.velocity, dir);
-			if (along < PlayerSpeed) {
-				along = glm::mix(along, PlayerSpeed, amt);
+		auto step = [&](int dx, int dy, uint8_t &downs) {
+			while (downs > 0) {
+				int tx = std::clamp(nx + dx, 0, BoardW - 1);
+				int ty = std::clamp(ny + dy, 0, BoardH - 1);
+				// block moving into another player's cell; remove this if you allow overlap
+				if (!cell_occupied(players, tx, ty, &p)) {
+					nx = tx;
+					ny = ty;
+				}
+				downs -= 1; // consume one press
 			}
+		};
 
-			//damp perpendicular velocity:
-			float perp = glm::dot(p.velocity, glm::vec2(-dir.y, dir.x));
-			perp = glm::mix(perp, 0.0f, amt);
-
-			p.velocity = dir * along + glm::vec2(-dir.y, dir.x) * perp;
-		}
-		p.position += p.velocity * elapsed;
-
-		//reset 'downs' since controls have been handled:
-		p.controls.left.downs = 0;
-		p.controls.right.downs = 0;
-		p.controls.up.downs = 0;
-		p.controls.down.downs = 0;
+		step(-1,  0, p.controls.left.downs);
+		step( 1,  0, p.controls.right.downs);
+		step( 0,  1, p.controls.up.downs);
+		step( 0, -1, p.controls.down.downs);
+		// jump not used in grid mode:
 		p.controls.jump.downs = 0;
+
+		p.gx = nx; p.gy = ny;
+		p.position = cell_center(p.gx, p.gy); // snap to center
+		p.velocity = glm::vec2(0.0f); // keep velocity zero in grid mode
+
+		// also clear pressed state drift (optional; client will keep pressed flags itself)
+		p.controls.left.pressed = false;
+		p.controls.right.pressed = false;
+		p.controls.up.pressed = false;
+		p.controls.down.pressed = false;
+		p.controls.jump.pressed = false;
 	}
 
-	//collision resolution:
+	// ★ no continuous physics/collisions in grid mode; keep arena clamp just in case
 	for (auto &p1 : players) {
-		//player/player collisions:
-		for (auto &p2 : players) {
-			if (&p1 == &p2) break;
-			glm::vec2 p12 = p2.position - p1.position;
-			float len2 = glm::length2(p12);
-			if (len2 > (2.0f * PlayerRadius) * (2.0f * PlayerRadius)) continue;
-			if (len2 == 0.0f) continue;
-			glm::vec2 dir = p12 / std::sqrt(len2);
-			//mirror velocity to be in separating direction:
-			glm::vec2 v12 = p2.velocity - p1.velocity;
-			glm::vec2 delta_v12 = dir * glm::max(0.0f, -1.75f * glm::dot(dir, v12));
-			p2.velocity += 0.5f * delta_v12;
-			p1.velocity -= 0.5f * delta_v12;
-		}
-		//player/arena collisions:
 		if (p1.position.x < ArenaMin.x + PlayerRadius) {
 			p1.position.x = ArenaMin.x + PlayerRadius;
-			p1.velocity.x = std::abs(p1.velocity.x);
 		}
 		if (p1.position.x > ArenaMax.x - PlayerRadius) {
 			p1.position.x = ArenaMax.x - PlayerRadius;
-			p1.velocity.x =-std::abs(p1.velocity.x);
 		}
 		if (p1.position.y < ArenaMin.y + PlayerRadius) {
 			p1.position.y = ArenaMin.y + PlayerRadius;
-			p1.velocity.y = std::abs(p1.velocity.y);
 		}
 		if (p1.position.y > ArenaMax.y - PlayerRadius) {
 			p1.position.y = ArenaMax.y - PlayerRadius;
-			p1.velocity.y =-std::abs(p1.velocity.y);
 		}
 	}
-
 }
 
 

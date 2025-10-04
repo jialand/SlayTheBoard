@@ -300,11 +300,20 @@ void Game::update(float elapsed) {
 				if (parried) {
 					// defender parries: attacker takes 1 damage
 					if (attacker.hp > 0) attacker.hp -= 1;
+					// [ADD] server-side debug:
+					std::cout << "[Combat] PARry  | " << defender.name << " parried " << attacker.name
+					          << "  => " << attacker.name << " HP=" << int(attacker.hp) << std::endl;
 				} else if (defended) {
 					// blocked: no damage
+					// [ADD] server-side debug:
+					std::cout << "[Combat] BLOCK  | " << defender.name << " blocked " << attacker.name
+					          << "  => " << defender.name << " HP=" << int(defender.hp) << std::endl;
 				} else {
 					// hit: defender takes 1 damage
 					if (defender.hp > 0) defender.hp -= 1;
+					// [ADD] server-side debug:
+					std::cout << "[Combat] HIT    | " << attacker.name << " hit " << defender.name
+					          << "  => " << defender.name << " HP=" << int(defender.hp) << std::endl;
 				}
 			}
 			ra.atk_cd = AttackCooldown;
@@ -333,11 +342,42 @@ void Game::update(float elapsed) {
 		if (p0.hp == 0 || p1.hp == 0) {
 			phase = Phase::RoundEnd;
 			winner_index = (p0.hp > p1.hp) ? 0 : 1;
+			game_over_timer = 0.0f;
 			const_cast<Player&>(p0).ready = false;
 			const_cast<Player&>(p1).ready = false;
 			// clear windows so不会残留到下一局
 			pstates.at(const_cast<Player*>(&p0)) = PerPlayerRuntime{};
 			pstates.at(const_cast<Player*>(&p1)) = PerPlayerRuntime{};
+		}
+	}
+
+	if (phase == Phase::RoundEnd && players.size() >= 2) {
+		game_over_timer += elapsed;
+		if (game_over_timer >= 5.0f) {
+			// move back to ReadyPrompt (ready room)
+			phase = Phase::ReadyPrompt;
+			winner_index = -1;     // clear winner for the new round
+			game_over_timer = 0.0f;
+	
+			// reset players: ready=false, hp restored, snap to spawns & facing
+			auto it_round = players.begin();          // <- renamed to avoid shadowing
+			Player &pl_a = *it_round++;               // <- renamed (was p0)
+			Player &pl_b = *it_round;                 // <- renamed (was p1)
+	
+			pl_a.ready = false; pl_b.ready = false;
+			pl_a.hp = 3;        pl_b.hp = 3;
+	
+			pl_a.cell = glm::ivec2(0, GridN - 1);  pl_a.facing = glm::ivec2(1, 0);
+			pl_b.cell = glm::ivec2(GridN - 1, 0);  pl_b.facing = glm::ivec2(-1, 0);
+	
+			pl_a.position = cell_to_world(pl_a.cell);
+			pl_b.position = cell_to_world(pl_b.cell);
+			pl_a.velocity = glm::vec2(0.0f);
+			pl_b.velocity = glm::vec2(0.0f);
+	
+			// clear per-player runtime windows & cooldowns (no carry-over)
+			pstates[&pl_a] = PerPlayerRuntime{};
+			pstates[&pl_b] = PerPlayerRuntime{};
 		}
 	}
 }
@@ -356,8 +396,27 @@ void Game::send_state_message(Connection *connection_, Player *connection_player
 	size_t mark = connection.send_buffer.size();
 
 	// write phase + winner_index first:
+	int8_t winner_for_conn = -1;
+	if (winner_index >= 0) {
+		// identify p0/p1 in server list:
+		const Player* p0 = nullptr;
+		const Player* p1 = nullptr;
+		auto it = players.begin();
+		if (it != players.end()) { p0 = &*it++; }
+		if (it != players.end()) { p1 = &*it; }
+
+		const Player* server_winner = (winner_index == 0 ? p0 : p1);
+		if (connection_player && server_winner && p0 && p1) {
+			// map to perspective: 0 = you, 1 = opponent
+			winner_for_conn = (server_winner == connection_player) ? 0 : 1;
+		} else {
+			// fallback (e.g., unexpected states)
+			winner_for_conn = winner_index;
+		}
+	}
+
 	connection.send(uint8_t(phase));
-	connection.send(int8_t(winner_index));
+	connection.send(int8_t(winner_for_conn));
 
 	// helper to send a player:
 	auto send_player = [&](Player const &player) {

@@ -67,6 +67,7 @@ struct Player {
 
 struct Game {
 	static constexpr size_t MaxPlayers = 2;
+	float game_over_timer = 0.0f;
 
 	// grid size:
 	inline static constexpr int GridN = 4;

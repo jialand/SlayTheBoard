@@ -16,6 +16,7 @@
 #include <string>
 #include <vector>
 #include <cmath>
+#include <limits>
 
 #include "TextRenderer.hpp"
 #include "SpriteRenderer.hpp"
@@ -460,18 +461,38 @@ void PlayMode::draw(glm::uvec2 const &drawable_size) {
 
 			// Use a server-stable mapping so both clients see the same colors.
 			// Parse trailing number from "Player N": N==1 -> P1 texture, else -> P2 texture.
-			auto choose_texture = [](const Player &pp)->GLuint {
-				int num = 0;
-				// name format is "Player N"
-				if (pp.name.size() >= 8 && pp.name.rfind("Player ", 0) == 0) {
-					// simple manual parse, no <cstdlib> needed:
-					for (size_t i = 7; i < pp.name.size(); ++i) {
-						char c = pp.name[i];
-						if (c >= '0' && c <= '9') num = num * 10 + (c - '0');
-						else break;
+			auto choose_texture = [&](const Player &pp)->GLuint {
+				auto parse_num = [](const std::string &name)->int {
+					if (name.size() >= 8 && name.rfind("Player ", 0) == 0) {
+						int num = 0; bool any = false;
+						for (size_t i = 7; i < name.size(); ++i) {
+							char c = name[i];
+							if (c >= '0' && c <= '9') { num = num * 10 + (c - '0'); any = true; }
+							else break;
+						}
+						if (any) return num;
+					}
+					return std::numeric_limits<int>::max(); // means "no number"
+				};
+			
+				const Player *red = nullptr;
+				int red_num = std::numeric_limits<int>::max();
+				bool any_numeric = false;
+			
+				for (const auto &p : game.players) {
+					int n = parse_num(p.name);
+					if (n != std::numeric_limits<int>::max()) {
+						any_numeric = true;
+						if (!red || n < red_num) { red = &p; red_num = n; }
 					}
 				}
-				return (num == 1 ? g_tex_p1 : g_tex_p2);
+				if (!any_numeric) {
+					for (const auto &p : game.players) {
+						if (!red || p.name < red->name) red = &p;
+					}
+				}
+				if (!red) return g_tex_p1;             // single player or fallback
+				return (&pp == red) ? g_tex_p1 : g_tex_p2;
 			};
 
 			GLuint tex = choose_texture(p);
@@ -490,16 +511,38 @@ void PlayMode::draw(glm::uvec2 const &drawable_size) {
 	// ---------------- HUD ----------------
 	{
 		// helper: choose P1/P2 texture from stable server-side name ("Player N")
-		auto choose_texture = [](const Player &pp)->GLuint {
-			int num = 0;
-			if (pp.name.size() >= 8 && pp.name.rfind("Player ", 0) == 0) {
-				for (size_t i = 7; i < pp.name.size(); ++i) {
-					char c = pp.name[i];
-					if (c >= '0' && c <= '9') num = num * 10 + (c - '0');
-					else break;
+		auto choose_texture = [&](const Player &pp)->GLuint {
+			auto parse_num = [](const std::string &name)->int {
+				if (name.size() >= 8 && name.rfind("Player ", 0) == 0) {
+					int num = 0; bool any = false;
+					for (size_t i = 7; i < name.size(); ++i) {
+						char c = name[i];
+						if (c >= '0' && c <= '9') { num = num * 10 + (c - '0'); any = true; }
+						else break;
+					}
+					if (any) return num;
+				}
+				return std::numeric_limits<int>::max(); // means "no number"
+			};
+		
+			const Player *red = nullptr;
+			int red_num = std::numeric_limits<int>::max();
+			bool any_numeric = false;
+		
+			for (const auto &p : game.players) {
+				int n = parse_num(p.name);
+				if (n != std::numeric_limits<int>::max()) {
+					any_numeric = true;
+					if (!red || n < red_num) { red = &p; red_num = n; }
 				}
 			}
-			return (num == 1 ? g_tex_p1 : g_tex_p2);
+			if (!any_numeric) {
+				for (const auto &p : game.players) {
+					if (!red || p.name < red->name) red = &p;
+				}
+			}
+			if (!red) return g_tex_p1;             // single player or fallback
+			return (&pp == red) ? g_tex_p1 : g_tex_p2;
 		};
 
 		// left panel (do not overlap the board)
@@ -550,7 +593,7 @@ void PlayMode::draw(glm::uvec2 const &drawable_size) {
 		// [ADD] draw enemy icon next to the label
 		if (game.players.size() > 1) {
 			GLuint enemy_tex = choose_texture(game.players.back());           // back() is OPPONENT
-			glm::vec2 en_icon_pos = right_pos + glm::vec2(0.60f, 0.01f);      // to the right of "Enemy is"
+			glm::vec2 en_icon_pos = right_pos + glm::vec2(0.50f, 0.01f);      // to the right of "Enemy is"
 			glm::vec2 en_icon_sz  = glm::vec2(Game::PlayerRadius * 2.4f);
 			g_sprites.draw(world_to_clip, enemy_tex, en_icon_pos, en_icon_sz, 0.0f, glm::vec4(1,1,1,1));
 		}

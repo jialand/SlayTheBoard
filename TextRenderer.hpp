@@ -1,3 +1,4 @@
+//@ChatGPT used
 #pragma once
 
 #include "GL.hpp"
